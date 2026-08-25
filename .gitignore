@@ -15,6 +15,7 @@ env/
 .ipynb_checkpoints/
 
 # Project data / outputs (regenerated from R via rpy2)
-data/
-logs/
-res/
+# Leading slash anchors to repo root so nested dirs (e.g. src/data/) are NOT ignored.
+/data/
+/logs/
+/res/
