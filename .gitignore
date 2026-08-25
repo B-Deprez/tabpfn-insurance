@@ -19,3 +19,8 @@ env/
 /data/
 /logs/
 /res/
+
+# Reference-only SLURM folders (inspiration; not part of the pipeline).
+# The active jobs live in /slurm/, which IS tracked.
+/slurm-tabpfn/
+/slurm-template/
