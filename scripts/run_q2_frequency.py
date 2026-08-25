@@ -3,6 +3,15 @@
 Evaluates TabPFN at subsample sizes {2k, 5k, 10k} and compares against
 GLM and XGBoost baselines on both French and Belgian MTPL frequency data.
 
+Exposure handling (EAJ Referee 1 fix). GLM uses a log-exposure offset and
+XGBoost a log-exposure base_margin; TabPFN supports neither, so for TabPFN
+exposure is an **input feature** (via ``get_raw_features_freq``): the model is
+trained on the bounded COUNT ``ClaimNb`` and the annualised rate μ is recovered
+by a counterfactual query at Exposure=1.0. μ plugs into the same
+exposure-weighted Poisson-deviance call as the baselines — the metric is
+unchanged. (Not a true offset: TabPFN learns the exposure effect rather than
+having a unit slope on log(Exposure) imposed.)
+
 Subsampling is nested: the script draws max(subsample_sizes) training rows
 per fold (seed = cv_seed + fold) and reuses the first N rows for each
 smaller size (2k ⊂ 5k ⊂ 10k), keeping the comparison fair.
@@ -12,15 +21,31 @@ Per-fold and pooled Poisson deviance are written to
 written to ``res/results_error_frequency.csv``.
 
 Usage:
-    python scripts/run_q2_frequency.py
+    python scripts/run_q2_frequency.py                       # baselines + TabPFN, append
+    python scripts/run_q2_frequency.py --force \
+        --tabpfn-versions v2_6                               # regenerate: archive old
+                                                            # freq CSVs, drop stale TabPFN
+                                                            # rows, keep GLM/XGBoost rows
+                                                            # verbatim, rerun TabPFN (v2_6)
+    python scripts/run_q2_frequency.py --skip-baselines \
+        --tabpfn-versions v3                                 # append TabPFN v3 only
+
+--force archives ``res/results_frequency.csv`` and ``res/results_error_frequency.csv``
+to ``res/archive/`` and rewrites them keeping only the GLM/XGBoost rows (byte for
+byte); it implies --skip-baselines so the baselines are preserved, never
+recomputed. --skip-baselines alone appends TabPFN rows without archiving or
+touching the baselines.
 """
 
 from __future__ import annotations
 
+import argparse
 import gc
+import shutil
 import sys
 import time
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -50,7 +75,13 @@ from src.utils.logging_setup import setup_logging
 from src.data.loaders import load_dataset
 from src.data.contracts import validate_dataset
 from src.data.cv import make_cv_splits, get_fold
-from src.data.preprocessing import encode_features, get_raw_features, get_targets
+from src.data.preprocessing import (
+    encode_features,
+    get_freq_exposure_col,
+    get_raw_features,
+    get_raw_features_freq,
+    get_targets,
+)
 from src.methods.glm_model import make_glm
 from src.methods.xgboost_model import make_xgboost
 from src.methods.tabpfn_model import (
@@ -165,8 +196,14 @@ def run_tabpfn_subsample(
     df,
     splits: list,
     feat_cfg: dict,
+    versions_override: list[str] | None = None,
 ) -> None:
-    """Run TabPFN at each subsample size, with nested subsampling."""
+    """Run TabPFN at each subsample size, with nested subsampling.
+
+    ``versions_override`` (from ``--tabpfn-versions``) restricts the run to a
+    subset of the configured TabPFN versions, e.g. v2_6 in one step and v3 in a
+    later one.
+    """
     task = cfg["task"]
     experiment_id = cfg["experiment_id"]
     n_folds = cfg["cv_folds"]
@@ -188,6 +225,14 @@ def run_tabpfn_subsample(
         "tabpfn_versions",
         [cfg["tabpfn"].get("tabpfn_version", "v3")],
     )
+    if versions_override is not None:
+        unknown = [v for v in versions_override if v not in tabpfn_versions]
+        if unknown:
+            logger.warning(
+                "  --tabpfn-versions %s not in configured versions %s; running anyway",
+                unknown, tabpfn_versions,
+            )
+        tabpfn_versions = list(versions_override)
     max_size = numeric_sizes[-1] if numeric_sizes else 0
 
     logger.info(
@@ -203,15 +248,23 @@ def run_tabpfn_subsample(
     for fold in range(n_folds):
         train_df, test_df = get_fold(df, splits, fold)
 
-        # TabPFN-2.6 uses raw unencoded features directly
-        X_train_full = get_raw_features(train_df, dataset, feat_cfg)
-        X_test = get_raw_features(test_df, dataset, feat_cfg)
+        # Exposure-as-feature fix (EAJ Referee 1): raw features PLUS the exposure
+        # column, so TabPFN sees exposure as an ordinary input.
+        exp_col = get_freq_exposure_col(dataset, feat_cfg)
+        X_train_full = get_raw_features_freq(train_df, dataset, feat_cfg)
+        X_test = get_raw_features_freq(test_df, dataset, feat_cfg)
         y_train_full, w_train_full, _ = get_targets(train_df, dataset, task)
         y_test, w_test, _ = get_targets(test_df, dataset, task)
         del train_df, test_df
 
-        # Strategy B: rate response. Compute once per fold; slice for each size.
-        y_rate_full = y_train_full / np.maximum(w_train_full, 1e-10)
+        # Model the bounded COUNT (ClaimNb) directly — NOT the rate. y_train_full
+        # is already ClaimNb; keep it as the fit target and slice per size.
+        y_count_full = np.asarray(y_train_full, dtype=float)
+
+        # Counterfactual test frame: every policy at a FULL year of exposure, so
+        # the model's expected-count output IS the annualised rate μ.
+        X_test_cf = X_test.copy()
+        X_test_cf[exp_col] = 1.0
 
         # Draw the master subsample (nested: smaller sizes take first N rows).
         # When "full" is requested we permute the entire fold so that the
@@ -229,13 +282,13 @@ def run_tabpfn_subsample(
                 actual_size = n_available
                 model_label = "tabpfn_full"
                 X_sub = X_train_full
-                y_rate_sub = y_rate_full
+                y_sub = y_count_full
             else:
                 actual_size = min(size, master_size)
                 model_label = f"tabpfn_{actual_size}"
                 idx = master_idx[:actual_size]
                 X_sub = X_train_full.iloc[idx].reset_index(drop=True)
-                y_rate_sub = y_rate_full[idx]
+                y_sub = y_count_full[idx]
 
             # v2.5 and v2.6 have fixed pretraining ceilings (50k and 100k rows
             # respectively); the "full" data point exists to exercise v3's
@@ -260,8 +313,8 @@ def run_tabpfn_subsample(
             for current_version in versions_for_size:
                 t0 = time.perf_counter()
                 model = _make_regressor(current_version, device)
-                model.fit(X_sub, y_rate_sub)
-                mu_test = model.predict(X_test)
+                model.fit(X_sub, y_sub)                 # fit on ClaimNb counts
+                mu_test = model.predict(X_test_cf)       # Exposure=1.0 → annualised μ
                 elapsed = time.perf_counter() - t0
 
                 dev = poisson_deviance(y_test, mu_test, w_test, sample_weight=w_test)
@@ -304,16 +357,25 @@ def run_tabpfn_subsample(
                 del model, mu_test
                 _release_gpu()
 
-            del X_sub, y_rate_sub
+            del X_sub, y_sub
 
         # End-of-fold cleanup before loading the next fold's data.
-        del X_train_full, X_test, y_train_full, w_train_full, y_test, w_test
-        del y_rate_full, y_rate_test, master_idx
+        del X_train_full, X_test, X_test_cf, y_train_full, w_train_full, y_test, w_test
+        del y_count_full, y_rate_test, master_idx
         _release_gpu()
 
 
-def run_dataset(dataset: str, cfg: dict) -> None:
-    """Run baseline and TabPFN experiments on one dataset."""
+def run_dataset(
+    dataset: str,
+    cfg: dict,
+    run_baselines_flag: bool = True,
+    versions_override: list[str] | None = None,
+) -> None:
+    """Run baseline and TabPFN experiments on one dataset.
+
+    ``run_baselines_flag=False`` skips GLM/XGBoost (their existing rows are
+    preserved verbatim during a TabPFN-only regeneration).
+    """
     task = cfg["task"]
     logger.info("=" * 70)
     logger.info("Dataset: %s  |  Task: %s", dataset, task)
@@ -324,22 +386,95 @@ def run_dataset(dataset: str, cfg: dict) -> None:
     splits = make_cv_splits(df, dataset, cfg)
     feat_cfg = yaml.safe_load(open(PROJECT_ROOT / "config" / "features.yaml"))
 
-    run_baselines(dataset, cfg, df, splits, feat_cfg)
-    run_tabpfn_subsample(dataset, cfg, df, splits, feat_cfg)
+    if run_baselines_flag:
+        run_baselines(dataset, cfg, df, splits, feat_cfg)
+    else:
+        logger.info("--- Skipping GLM/XGBoost baselines (preserved verbatim) ---")
+    run_tabpfn_subsample(dataset, cfg, df, splits, feat_cfg, versions_override)
 
     del df, splits, feat_cfg
     _release_gpu()
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Regeneration: archive + keep baselines (decision A — see CLAUDE.md)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_BASELINE_MODELS = ("glm", "xgboost")
+
+
+def _archive_and_keep_baselines(path: Path) -> None:
+    """Archive ``path`` to res/archive/ then rewrite it keeping only GLM/XGBoost.
+
+    The kept rows are written back byte-for-byte (text-level filter, no pandas
+    reformatting) so the preserved baselines stay identical to the snapshot. The
+    stale TabPFN rows are dropped; the corrected TabPFN rows are appended
+    afterwards by the normal (append-only) writer.
+    """
+    if not path.exists():
+        logger.warning("--force: %s does not exist; nothing to archive", path)
+        return
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive_dir = PROJECT_ROOT / "res" / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / f"{path.stem}_{stamp}{path.suffix}"
+    shutil.copy2(path, archive_path)
+
+    lines = path.read_text().splitlines(keepends=True)
+    header, body = lines[:1], lines[1:]
+    # ``model`` is field index 3; result values never contain commas.
+    kept = [ln for ln in body if ln.split(",", 5)[3] in _BASELINE_MODELS]
+    path.write_text("".join(header + kept))
+    logger.info(
+        "--force: archived %s -> %s ; kept %d baseline rows, dropped %d TabPFN rows",
+        path.name, archive_path, len(kept), len(body) - len(kept),
+    )
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Q2 frequency ceiling experiment.")
+    p.add_argument(
+        "--force", action="store_true",
+        help="Archive the frequency result CSVs and drop stale TabPFN rows, "
+             "keeping GLM/XGBoost rows verbatim; implies --skip-baselines.",
+    )
+    p.add_argument(
+        "--skip-baselines", action="store_true",
+        help="Do not run GLM/XGBoost this invocation (preserve existing rows).",
+    )
+    p.add_argument(
+        "--tabpfn-versions", nargs="+", default=None, metavar="VERSION",
+        help="Restrict the TabPFN sweep to these versions (e.g. v2_6). "
+             "Defaults to the versions in the config.",
+    )
+    return p.parse_args()
+
+
 def main() -> None:
+    args = _parse_args()
+
     with open(CFG_PATH) as f:
         cfg = yaml.safe_load(f)
 
     setup_logging(cfg["experiment_id"])
     logger.info("Starting Q2 frequency ceiling experiment")
+    if args.tabpfn_versions:
+        logger.info("TabPFN versions restricted to: %s", args.tabpfn_versions)
+
+    # --force implies preserving (not recomputing) the baselines.
+    skip_baselines = args.skip_baselines or args.force
+
+    if args.force:
+        logger.info("--force: regenerating TabPFN frequency rows (archive + rewrite)")
+        for path in (RESULTS_PATH, ERROR_METRICS_PATH):
+            _archive_and_keep_baselines(path)
 
     for dataset in cfg["datasets"]:
-        run_dataset(dataset, cfg)
+        run_dataset(
+            dataset, cfg,
+            run_baselines_flag=not skip_baselines,
+            versions_override=args.tabpfn_versions,
+        )
         _release_gpu()
 
     logger.info(
