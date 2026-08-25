@@ -163,12 +163,15 @@ def run_dataset(dataset: str, cfg: dict) -> None:
             # Fit + predict with wall-clock timing
             fold_seed = cv_seed + fold
             t0 = time.perf_counter()
-            fit_kwargs: dict = dict(
-                sample_weight=w_train,
-                log_exposure=log_exp_train,
-            )
             if model_name == "tabpfn":
-                fit_kwargs["fold_seed"] = fold_seed
+                # TabPFN severity is UNWEIGHTED at estimation: TabPFN supports no
+                # sample_weight, so ClaimNb is NOT passed as a fit weight (the old
+                # sample_weight=ClaimNb was a silent no-op). The ClaimNb weighting
+                # legitimately remains at EVALUATION (gamma_deviance below).
+                fit_kwargs: dict = dict(log_exposure=log_exp_train, fold_seed=fold_seed)
+            else:
+                # GLM (var_weights) and XGBoost (sample_weight) weight by ClaimNb.
+                fit_kwargs = dict(sample_weight=w_train, log_exposure=log_exp_train)
             model.fit(X_train, y_train, **fit_kwargs)
             mu_test = model.predict(X_test, log_exposure=log_exp_test)
             elapsed = time.perf_counter() - t0
