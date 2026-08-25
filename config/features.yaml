@@ -18,6 +18,15 @@
 #
 # Assumption: spatial columns (long, lat) in beMTPL97 are excluded from
 # modelling because they are not listed in the experiment outline feature table.
+#
+# tabpfn_freq_exposure_feature (per dataset, frequency task only):
+#   Exposure fairness fix (EAJ Referee 1). TabPFN supports neither a Poisson
+#   offset nor sample_weight, so for the FREQUENCY task exposure is handed to
+#   TabPFN as an ordinary input feature (the model is trained on the bounded
+#   count ClaimNb and the annualised rate is recovered with a counterfactual
+#   Exposure=1.0 query). This key names that exposure column. It is read ONLY by
+#   the TabPFN frequency path (get_raw_features_freq / TabPFNFreq); encode_features
+#   (GLM/XGBoost) never reads it, so the GLM/XGBoost baselines are unaffected.
 
 datasets:
 
@@ -73,6 +82,9 @@ datasets:
         type: numeric
         glm: numeric
         tree: numeric
+
+    # TabPFN frequency only — exposure fed as an input feature (see header note).
+    tabpfn_freq_exposure_feature: Exposure
 
   beMTPL97:
     # Ordered list of feature columns used in beMTPL97 (freq and sev tasks share
@@ -133,6 +145,9 @@ datasets:
         type: ordinal_integer
         glm: numeric
         tree: numeric
+
+    # TabPFN frequency only — exposure fed as an input feature (see header note).
+    tabpfn_freq_exposure_feature: expo
 
   fretelematic:
     # French telematics dataset (1,177 policies).  Target = Claim (binary).

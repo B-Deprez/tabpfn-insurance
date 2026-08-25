@@ -341,3 +341,61 @@ def get_raw_features(
     if missing:
         logger.warning("get_raw_features: columns not found in DataFrame — %s", missing)
     return df[cols].reset_index(drop=True)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Exposure-as-feature helpers for the TabPFN FREQUENCY task
+# ──────────────────────────────────────────────────────────────────────────────
+# Exposure fairness fix (EAJ Referee 1): TabPFN supports neither a Poisson offset
+# nor sample_weight, so exposure is handed to it as an ordinary input feature and
+# the annualised rate is recovered later with a counterfactual Exposure=1.0 query.
+# These helpers are used ONLY by the TabPFN frequency path; ``get_raw_features``,
+# ``encode_features`` and ``get_targets`` are unchanged, so the severity, SHAP and
+# GLM/XGBoost paths are unaffected.
+
+def get_freq_exposure_col(dataset: str, feat_cfg: dict | None = None) -> str | None:
+    """Return the exposure column TabPFN-frequency uses as an input feature.
+
+    Reads the ``tabpfn_freq_exposure_feature`` key from ``config/features.yaml``.
+    Returns ``None`` when the dataset declares no exposure feature (e.g. the
+    classification dataset).  This key is never consulted by ``encode_features``,
+    so it cannot leak into the GLM/XGBoost design matrices.
+    """
+    if feat_cfg is None:
+        feat_cfg = _load_feat_cfg()
+    return feat_cfg["datasets"][dataset].get("tabpfn_freq_exposure_feature")
+
+
+def get_raw_features_freq(
+    df: pd.DataFrame,
+    dataset: str,
+    feat_cfg: dict | None = None,
+) -> pd.DataFrame:
+    """Raw TabPFN features for the FREQUENCY task, with exposure appended.
+
+    Extends :func:`get_raw_features` by adding the exposure column named in
+    ``tabpfn_freq_exposure_feature`` as the last input feature.  The model is then
+    trained on the bounded count (``ClaimNb``) with exposure among the inputs; the
+    annualised rate μ is recovered by querying at ``Exposure=1.0`` (see
+    ``TabPFNFreq``).
+
+    Note this is NOT a true offset — TabPFN *learns* the exposure effect rather
+    than having a unit slope on ``log(Exposure)`` imposed, which is the fairest
+    option available given TabPFN has neither an offset nor sample_weight.
+    """
+    if feat_cfg is None:
+        feat_cfg = _load_feat_cfg()
+    exp_col = get_freq_exposure_col(dataset, feat_cfg)
+    if exp_col is None:
+        raise ValueError(
+            f"Dataset '{dataset}' declares no 'tabpfn_freq_exposure_feature' in "
+            f"features.yaml; cannot build the TabPFN frequency feature set."
+        )
+    if exp_col not in df.columns:
+        raise ValueError(
+            f"Exposure feature '{exp_col}' not found in DataFrame for '{dataset}'."
+        )
+    X = get_raw_features(df, dataset, feat_cfg).copy()
+    # Use .to_numpy() so the append is index-agnostic (both frames are 0..n-1).
+    X[exp_col] = df[exp_col].to_numpy(dtype=float)
+    return X
