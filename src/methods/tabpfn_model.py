@@ -15,8 +15,11 @@ Exposure / target handling:
                  counterfactual Exposure=1.0 query at predict time. This is NOT a
                  true offset — the model learns the exposure effect rather than
                  having a unit slope on log(Exposure) imposed.
-    Severity   : response = log(AvgSeverity) (log-transformed),
-                 predictions inverted with exp().
+    Severity   : response = raw AvgSeverity with TabPFN's built-in ``1_plus_log``
+                 target transform (fit on log(1 + y)); ``predict`` returns the
+                 mean of the predictive distribution on the ORIGINAL scale, so
+                 no manual exp() back-transform (which would give roughly the
+                 median, biased below the mean).
 
 TabPFNRegressor.fit() accepts only (X, y) — no sample_weight argument.
 
@@ -72,12 +75,22 @@ def _resolve_model_version(version: str):
     )
 
 
-def _make_regressor(version: str, device: str):
-    """Build a ``TabPFNRegressor`` for the requested internal model version."""
+def _make_regressor(version: str, device: str, **overrides):
+    """Build a ``TabPFNRegressor`` for the requested internal model version.
+
+    ``overrides`` are forwarded to ``create_default_for_version`` (e.g. the
+    severity ``inference_config``); without them the version defaults apply.
+    """
     from tabpfn import TabPFNRegressor
     return TabPFNRegressor.create_default_for_version(
-        _resolve_model_version(version), device=device,
+        _resolve_model_version(version), device=device, **overrides,
     )
+
+
+# Severity target transform: TabPFN fits on log(1 + y) and inverts the whole
+# predictive distribution, so ``predict`` returns E[y] on the original scale.
+# Same setting as the Prior Labs insurance cookbook's claim-amount models.
+_SEV_INFERENCE_CONFIG = {"REGRESSION_Y_PREPROCESS_TRANSFORMS": ("1_plus_log",)}
 
 
 def _make_classifier(version: str, device: str):
@@ -249,10 +262,14 @@ class TabPFNFreq:
 
 
 class TabPFNSev:
-    """TabPFN regressor for severity modelling (log-transform).
+    """TabPFN regressor for severity modelling (``1_plus_log`` target transform).
 
-    Raw unencoded features are passed directly to TabPFN.
-    Response = log(AvgSeverity); predictions are inverted with exp().
+    Raw unencoded features are passed directly to TabPFN. The response is the
+    raw AvgSeverity; TabPFN's built-in ``1_plus_log`` transform fits on
+    log(1 + y) and maps the predictive distribution back, so ``predict`` returns
+    its MEAN on the original scale. This replaces the former manual
+    fit-on-log(y) / exp(prediction), which returned exp(E[log y]) — roughly the
+    median, systematically below E[y] for right-skewed claim amounts.
 
     Unweighted at estimation: TabPFN supports no sample_weight, so the ClaimNb
     weighting used by the GLM/XGBoost severity models is NOT applied at fit time
@@ -283,29 +300,30 @@ class TabPFNSev:
         log_exposure: np.ndarray | None = None,
         fold_seed: int = 0,
     ) -> "TabPFNSev":
-        """Fit TabPFN on log-transformed average severity.
+        """Fit TabPFN on raw average severity with the ``1_plus_log`` transform.
 
         Args:
             X_train: raw (unencoded) feature DataFrame.
-            y_train: average severity (AvgSeverity = ClaimAmount / ClaimNb).
+            y_train: average severity (AvgSeverity = ClaimAmount / ClaimNb),
+                passed on the original scale — TabPFN applies log(1 + y).
             sample_weight: accepted for interface parity; not used (TabPFN
                 does not support sample_weight in fit()).
             log_exposure: unused for severity; accepted for interface parity.
             fold_seed: RNG seed for the subsample draw.
         """
         self._feature_names = list(X_train.columns)
+        y = np.asarray(y_train, dtype=float)
 
-        # Log-transform response (CLAUDE.md §Feature Encoding)
-        log_y = np.log(np.maximum(y_train, 1e-10))
-
-        X_sub, y_sub = _subsample(X_train, log_y, self.max_train_size, fold_seed)
+        X_sub, y_sub = _subsample(X_train, y, self.max_train_size, fold_seed)
         if len(X_sub) < len(X_train):
             logger.info(
                 "TabPFNSev: subsampled %d → %d rows (seed=%d)",
                 len(X_train), len(X_sub), fold_seed,
             )
 
-        self._model = _make_regressor(self.tabpfn_version, self._device)
+        self._model = _make_regressor(
+            self.tabpfn_version, self._device, inference_config=_SEV_INFERENCE_CONFIG,
+        )
         self._model.fit(X_sub, y_sub)
         logger.info("TabPFNSev fitted on %d rows", len(X_sub))
         return self
@@ -315,13 +333,13 @@ class TabPFNSev:
         X_test: pd.DataFrame,
         log_exposure: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Return predicted average severity (exp of log-space prediction)."""
+        """Return predicted average severity: the predictive MEAN, original scale."""
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet")
-        return np.exp(self._model.predict(X_test))
+        return self._model.predict(X_test)
 
     def get_shap_values(self, X_test: pd.DataFrame) -> np.ndarray:
-        """Return SHAP values in log-space from TabPFN's built-in explainer."""
+        """Return SHAP values (original severity scale) from TabPFN's explainer."""
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet")
         if hasattr(self._model, "get_shap_values"):

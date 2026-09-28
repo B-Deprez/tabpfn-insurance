@@ -1,4 +1,4 @@
-"""Post-regeneration invariant check for the Q2 frequency exposure fix.
+"""Post-regeneration invariant check for the TabPFN re-runs (Q2 freq, Q1 sev).
 
 Run AFTER the exposure re-run (e.g. on the VSC). Confirms the GLM/XGBoost rows
 in the new result CSVs are byte-identical to the reference copy, i.e. the
@@ -12,8 +12,9 @@ Reference depends on how the re-run was written:
                             copy ``--force`` just archived in ``res/archive/``.
 
 Usage:
-    python scripts/verify_q2_regeneration.py --results-tag expo
-    python scripts/verify_q2_regeneration.py                      # --force layout
+    python scripts/verify_q2_regeneration.py --results-tag expo               # Q2 frequency
+    python scripts/verify_q2_regeneration.py --task sev --results-tag log1p   # Q1 severity
+    python scripts/verify_q2_regeneration.py                                  # --force layout
 
 Exit 0 = baselines unchanged; 1 = drift (investigate before trusting the run).
 """
@@ -28,7 +29,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RES = PROJECT_ROOT / "res"
 ARCHIVE = RES / "archive"
 BASELINE_MODELS = ("glm", "xgboost")
-PAIRS = ["results_frequency.csv", "results_error_frequency.csv"]
+PAIRS = {
+    "freq": ["results_frequency.csv", "results_error_frequency.csv"],
+    "sev": ["results_severity.csv", "results_error_severity.csv"],
+}
 
 
 def _baseline_lines(path: Path) -> list[str]:
@@ -45,19 +49,24 @@ def _latest_archive(stem: str, suffix: str) -> Path | None:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Verify Q2 baselines were preserved.")
+    p = argparse.ArgumentParser(description="Verify baselines were preserved.")
+    p.add_argument(
+        "--task", choices=sorted(PAIRS), default="freq",
+        help="Which result files to check (default: freq).",
+    )
     p.add_argument(
         "--results-tag", default=None, metavar="TAG",
-        help="Check the tagged files written with run_q2_frequency.py --results-tag "
-             "TAG against the untagged originals (default: --force archive layout).",
+        help="Check the tagged files written with --results-tag TAG against the "
+             "untagged originals (default: --force archive layout).",
     )
     return p.parse_args()
 
 
 def main() -> int:
-    tag = _parse_args().results_tag
+    args = _parse_args()
+    tag = args.results_tag
     ok = True
-    for name in PAIRS:
+    for name in PAIRS[args.task]:
         stem, suffix = Path(name).stem, Path(name).suffix
         if tag:
             live = RES / f"{stem}_{tag}{suffix}"

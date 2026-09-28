@@ -54,7 +54,7 @@ The decisions are recorded in that notebook and then hard-coded in `config/featu
 | Ordinal categoricals (e.g. bonus-malus bands, age groups, vehicle age) | All | Ordinal/label encoding, respecting the natural order |
 | Nominal categoricals (e.g. region, fuel type, coverage type) | GLM | One-hot encoding |
 | Nominal categoricals | XGBoost, TabPFN | Label encoding (integer codes) |
-| Severity target | TabPFN only | Log-transform `y` before fitting; invert with `exp()` after predicting |
+| Severity target | TabPFN only | TabPFN's built-in `1_plus_log` target transform (fit on `log(1 + y)`); `predict` returns the predictive mean on the original scale |
  
 **Note for paper:** The absence of GAM-based binning for the GLM is acknowledged as a limitation.
 More principled approaches (e.g. PD-clustering via `maidrr`) exist but are outside the scope of
@@ -81,9 +81,13 @@ the way it does for the baselines. It is handled per task as follows.
   > the exposure effect. It is the fairest option available given TabPFN has
   > neither an offset nor `sample_weight`, but it is not identical to an offset.
  
-- **Severity — log target, unweighted at estimation.** Response =
-  `log(AvgSeverity)` (`AvgSeverity = ClaimAmount / ClaimNb`), inverted with
-  `exp()`. TabPFN cannot take `sample_weight`, so — unlike the GLM
+- **Severity — `1_plus_log` target, unweighted at estimation.** Response =
+  `AvgSeverity` (`AvgSeverity = ClaimAmount / ClaimNb`) on the original scale,
+  with TabPFN's built-in `1_plus_log` target transform
+  (`inference_config={"REGRESSION_Y_PREPROCESS_TRANSFORMS": ("1_plus_log",)}`, as in
+  the Prior Labs insurance cookbook). TabPFN maps its whole predictive
+  distribution back to the original scale, so `predict` returns E[y]. TabPFN
+  cannot take `sample_weight`, so — unlike the GLM
   (`var_weights=ClaimNb`) and XGBoost (`sample_weight=ClaimNb`) — TabPFN severity
   is **unweighted at estimation**; the `ClaimNb` weighting legitimately remains at
   **evaluation** (Gamma deviance is weighted by `ClaimNb` for all models).
@@ -92,8 +96,12 @@ the way it does for the baselines. It is handled per task as follows.
 > which fed TabPFN the rate `ClaimNb/Exposure` with `sample_weight=Exposure` for
 > frequency. TabPFN ignores `sample_weight`, so that weighting was a silent no-op
 > and the frequency comparison was not like-for-like — frequency results must be
-> regenerated. **Severity numbers are unaffected** (the `sample_weight` no-op
-> applied there too).
+> regenerated. The severity `sample_weight` no-op alone changed nothing, but
+> severity is ALSO regenerated: the former manual fit-on-`log(y)` / `exp()`
+> back-transform returned exp(E[log y]) — roughly the median, systematically
+> below the mean for right-skewed claim amounts — and is replaced by the
+> `1_plus_log` mean. Old results are kept in the untagged `res/` files; the
+> corrected runs are `res/*_expo.csv` (frequency) and `res/*_log1p.csv` (severity).
 ---
  
 ## Cross-Validation Scheme

@@ -10,12 +10,28 @@ different failure mode: a severity model can be poorly calibrated on the
 absolute scale (large RMSE / deviance) yet still rank observations correctly,
 which the correlations expose.
 
+TabPFN severity uses TabPFN's built-in ``1_plus_log`` target transform and
+returns the predictive mean on the original scale (see ``TabPFNSev``).
+
 Usage:
-    python scripts/run_q1_severity.py
+    python scripts/run_q1_severity.py                        # all models, append
+    python scripts/run_q1_severity.py --skip-baselines \
+        --results-tag log1p                                  # TabPFN re-run into NEW files
+                                                            # res/results_severity_log1p.csv
+                                                            # (+ _error_), seeded with the
+                                                            # GLM/XGBoost rows verbatim; the
+                                                            # old files are left untouched
+
+--results-tag TAG writes to ``res/results_severity_TAG.csv`` and
+``res/results_error_severity_TAG.csv`` instead of the default files. With
+--skip-baselines, a tagged file that does not exist yet is seeded with the
+header and the GLM/XGBoost rows of the untagged file (byte for byte); an
+existing tagged file is appended to. Mirrors ``run_q2_frequency.py``.
 """
 
 from __future__ import annotations
 
+import argparse
 import gc
 import sys
 import time
@@ -98,8 +114,12 @@ def _expand_models(models: list[str], tabpfn_versions: list[str]) -> list[tuple[
     return pairs
 
 
-def run_dataset(dataset: str, cfg: dict) -> None:
-    """Run all models on one dataset for the severity task."""
+def run_dataset(dataset: str, cfg: dict, run_baselines_flag: bool = True) -> None:
+    """Run all models on one dataset for the severity task.
+
+    ``run_baselines_flag=False`` skips GLM/XGBoost (their existing rows are
+    preserved verbatim during a TabPFN-only re-run).
+    """
     task = cfg["task"]  # "sev"
     experiment_id = cfg["experiment_id"]
     n_folds = cfg["cv_folds"]
@@ -126,6 +146,9 @@ def run_dataset(dataset: str, cfg: dict) -> None:
     feat_cfg = yaml.safe_load(open(PROJECT_ROOT / "config" / "features.yaml"))
 
     for model_name, row_version in _expand_models(cfg["models"], tabpfn_versions):
+        if not run_baselines_flag and model_name in _BASELINE_MODELS:
+            logger.info("--- Skipping %s (preserved verbatim) ---", model_name)
+            continue
         family = _model_family(model_name)
         descr = f"{model_name} ({row_version})" if row_version else model_name
         logger.info("--- Model: %s ---", descr)
@@ -264,7 +287,66 @@ def run_dataset(dataset: str, cfg: dict) -> None:
     _release_gpu()
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Tagged re-run: keep the old results side by side (mirrors run_q2_frequency.py)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_BASELINE_MODELS = ("glm", "xgboost")
+
+
+def _is_baseline_row(line: str) -> bool:
+    # ``model`` is field index 3; result values never contain commas.
+    return line.split(",", 5)[3] in _BASELINE_MODELS
+
+
+def _tagged_path(path: Path, tag: str) -> Path:
+    """``res/results_severity.csv`` -> ``res/results_severity_<tag>.csv``."""
+    return path.with_name(f"{path.stem}_{tag}{path.suffix}")
+
+
+def _seed_baselines(src: Path, dst: Path) -> None:
+    """Create ``dst`` holding the header + GLM/XGBoost rows of ``src`` verbatim.
+
+    Text-level copy (no pandas reformatting), so the tagged file carries exactly
+    the same baselines as the original. An existing ``dst`` is left as-is.
+    """
+    if dst.exists():
+        logger.info("--results-tag: %s exists; appending to it", dst.name)
+        return
+    if not src.exists():
+        logger.warning(
+            "--results-tag: %s does not exist; %s starts without baselines", src, dst.name,
+        )
+        return
+    lines = src.read_text().splitlines(keepends=True)
+    header, kept = lines[:1], [ln for ln in lines[1:] if _is_baseline_row(ln)]
+    dst.write_text("".join(header + kept))
+    logger.info(
+        "--results-tag: seeded %s with %d baseline rows from %s",
+        dst.name, len(kept), src.name,
+    )
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Q1 severity benchmark.")
+    p.add_argument(
+        "--skip-baselines", action="store_true",
+        help="Do not run GLM/XGBoost this invocation (preserve existing rows).",
+    )
+    p.add_argument(
+        "--results-tag", default=None, metavar="TAG",
+        help="Write to res/results_severity_TAG.csv and "
+             "res/results_error_severity_TAG.csv instead of the default files "
+             "(the old results stay untouched). With --skip-baselines a new tagged "
+             "file is seeded with the GLM/XGBoost rows of the default file.",
+    )
+    return p.parse_args()
+
+
 def main() -> None:
+    global RESULTS_PATH, ERROR_METRICS_PATH
+    args = _parse_args()
+
     with open(CFG_PATH) as f:
         cfg = yaml.safe_load(f)
 
@@ -272,8 +354,23 @@ def main() -> None:
     logger.info("Starting Q1 severity benchmark")
     logger.info("Config: %s", CFG_PATH)
 
+    # Redirect output to tagged files so the old results stay side by side.
+    if args.results_tag:
+        untagged = (RESULTS_PATH, ERROR_METRICS_PATH)
+        RESULTS_PATH, ERROR_METRICS_PATH = (
+            _tagged_path(p, args.results_tag) for p in untagged
+        )
+        logger.info(
+            "--results-tag %s: writing to %s and %s",
+            args.results_tag, RESULTS_PATH.name, ERROR_METRICS_PATH.name,
+        )
+        # Baselines preserved (not recomputed): copy them into the tagged file.
+        if args.skip_baselines:
+            for src, dst in zip(untagged, (RESULTS_PATH, ERROR_METRICS_PATH)):
+                _seed_baselines(src, dst)
+
     for dataset in cfg["datasets"]:
-        run_dataset(dataset, cfg)
+        run_dataset(dataset, cfg, run_baselines_flag=not args.skip_baselines)
         _release_gpu()
 
     logger.info(

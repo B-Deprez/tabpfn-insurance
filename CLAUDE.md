@@ -76,7 +76,7 @@ and technique only, not a runnable dependency*:
 | Task | GLM | XGBoost | TabPFN |
 |------|-----|---------|--------|
 | **Frequency** | `y=ClaimNb`, Poisson log-link, **offset `log(Exposure)`**; predict ÷ exposure → rate | `y=ClaimNb`, `count:poisson`, **`base_margin=log(Exposure)`**; predict ÷ exposure → rate | **INVALID**: `y=ClaimNb/Exposure` (rate), fit on rate; `sample_weight=Exposure` **ignored** (unsupported). Inlined in `run_q2_frequency.py`, not via the wrapper. |
-| **Severity** | `y=AvgSeverity`, Gamma log-link, **`var_weights=ClaimNb`** | `y=AvgSeverity`, `reg:gamma`, **`sample_weight=ClaimNb`** | `y=log(AvgSeverity)`, predict `exp(...)`; **`sample_weight=ClaimNb` passed but ignored** → unweighted at estimation (dead kwarg). |
+| **Severity** | `y=AvgSeverity`, Gamma log-link, **`var_weights=ClaimNb`** | `y=AvgSeverity`, `reg:gamma`, **`sample_weight=ClaimNb`** | `y=log(AvgSeverity)`, predict `exp(...)` → exp(E[log y]) ≈ median, **biased low** (fixed in Step 6: built-in `1_plus_log`, original-scale mean); **`sample_weight=ClaimNb` passed but ignored** → unweighted at estimation (dead kwarg). |
 
 **Evaluation is identical across models** (this must not change):
 - Frequency: `poisson_deviance(y=counts, mu=rate, exposure, sample_weight=exposure)`
@@ -149,7 +149,8 @@ scale the existing `poisson_deviance`/`exposure_weighted_rmse_rate` calls expect
       "unweighted at estimation"; NEW `tests/test_tabpfn_sev_unweighted.py`).*
       Log-transform kept. **Provably number-preserving** (test shows TabPFN trains on
       identical inputs with/without the weight; GLM/XGBoost untouched) → **no VSC
-      re-run needed for Step 3**; existing severity results stay valid.
+      re-run needed for Step 3**; existing severity results stay valid. *(Severity is
+      nonetheless re-run for the separate Step 6 fix.)*
 - [~] **Step 4 — Re-run v3** and reconcile with v2_6. VSC-blocked: no code; runs on
       the VSC (`--skip-baselines --results-tag expo --tabpfn-versions v3`), then reconcile the corrected
       v2_6 vs v3 numbers once both exist.
@@ -164,6 +165,14 @@ scale the existing `poisson_deviance`/`exposure_weighted_rmse_rate` calls expect
       "competitive" claim — TO CONFIRM on VSC). Pre-existing outline staleness (Q2
       datasets/sizes, Q1 10k note, single `results.csv`) left as-is per scope.
       **Remaining = numeric reconciliation after the VSC v2_6/v3 runs (ties to Step 4).**
+- [~] **Step 6 — Severity `1_plus_log` fix.** CODE COMPLETE, awaiting the VSC run
+      (see D11). *(IN-SCOPE: `TabPFNSev` in `src/methods/tabpfn_model.py` — raw
+      `AvgSeverity` + `inference_config={"REGRESSION_Y_PREPROCESS_TRANSFORMS":
+      ("1_plus_log",)}`, `predict` returns TabPFN's original-scale mean, no `exp()`;
+      SHARED-additive: `_make_regressor(..., **overrides)`, default unchanged for freq;
+      `scripts/run_q1_severity.py` gains `--skip-baselines` / `--results-tag`;
+      `verify_q2_regeneration.py --task sev`; tests updated.)* Not number-preserving:
+      VSC run `--skip-baselines --results-tag log1p` → `res/*_severity_log1p.csv`.
 
 **Invariant enforced by TEST after every step:** GLM/XGBoost statistical values
 (excluding `fit_predict_seconds`, which is wall-clock) diff byte-identically
@@ -226,6 +235,17 @@ unchanged. That guarantee — not a file ban — is what makes the fix trustwort
   the originals. VSC's own `res/` held every baseline row twice (88/40 vs 44/20);
   replace it with the Mac copies (snapshot-verified) before stage 1, since the seed
   copies whatever is there.
+- **D11 — Severity uses TabPFN's built-in `1_plus_log` (Step 6).** The former
+  fit-on-`log(AvgSeverity)` + `exp(predict)` returned exp(E[log y]) — roughly the
+  median, below E[y] for right-skewed amounts — so TabPFN severity was biased low
+  against GLM/XGBoost (which predict the mean). Now raw `AvgSeverity` with
+  `inference_config={"REGRESSION_Y_PREPROCESS_TRANSFORMS": ("1_plus_log",)}` (the
+  Prior Labs insurance cookbook setting); TabPFN inverts the whole predictive
+  distribution, so `predict` = original-scale mean. Local smoke (beMTPL97 fold 0,
+  v3, 3k train / 1.5k test): mean pred 451 → 1,322 vs observed 1,383; Gamma dev
+  3.84 → 2.10. Re-run tagged `log1p` (D10 mechanism), old severity files kept.
+  Flag: `TabPFNSev.get_shap_values` now explains original-scale predictions (was
+  log scale) — Q3 severity SHAP changes if re-run; run_q3 not modified or re-run.
 
 ---
 

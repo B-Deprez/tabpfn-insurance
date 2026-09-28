@@ -7,7 +7,7 @@ in `slurm/logs/%x_%j.{out,err}` (job name + job id). Submit from the repo root.
 
 | Script | Runs | Wall-time |
 |--------|------|-----------|
-| `submit_q1_severity.slurm`  | `run_q1_severity.py` (config-driven: both datasets, v2_6 + v3) | 4 h |
+| `submit_q1_severity.slurm`  | `run_q1_severity.py --skip-baselines --results-tag log1p` (TabPFN v2_6 + v3, both datasets) | 4 h |
 | `submit_q2_freq_v2_6.slurm` | `run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v2_6` | 12 h |
 | `submit_q2_freq_v3.slurm`   | `run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v3` | 24 h |
 
@@ -16,8 +16,12 @@ in `slurm/logs/%x_%j.{out,err}` (job name + job id). Submit from the repo root.
 ```bash
 cd $VSC_DATA/tabpfn/tabpfn_insurance
 
-# Q1 severity — independent, submit any time.
+# Q1 severity — independent, submit any time. Writes res/results_severity_log1p.csv
+# + res/results_error_severity_log1p.csv (GLM/XGBoost copied verbatim from the
+# originals); the original severity files are never touched.
 sbatch slurm/submit_q1_severity.slurm
+# After it finishes:
+python scripts/verify_q2_regeneration.py --task sev --results-tag log1p
 
 # Q2 frequency — MUST be staged. v2_6 first: it creates res/results_frequency_expo.csv
 # + res/results_error_frequency_expo.csv (GLM/XGBoost rows copied verbatim from the
@@ -43,7 +47,8 @@ python scripts/verify_q2_regeneration.py --results-tag expo
   re-seeded from the originals); otherwise a rerun appends duplicate TabPFN rows.
 - **Baselines are copied, not recomputed.** Check the original files hold each
   GLM/XGBoost row once before stage 1 (44 rows in `results_frequency.csv`, 20 in
-  `results_error_frequency.csv`) — the seed copies whatever is there.
+  `results_error_frequency.csv`; 44 in `results_severity.csv`, 88 in
+  `results_error_severity.csv`) — the seed copies whatever is there.
 - **Changing cluster/account.** Settings are copied from the previous
   `slurm-tabpfn/` jobs (`--clusters=wice --partition=gpu_h100
   --account=lp_verbekelab`). Edit the `#SBATCH` headers if your allocation differs.
