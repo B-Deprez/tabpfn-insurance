@@ -8,8 +8,8 @@ in `slurm/logs/%x_%j.{out,err}` (job name + job id). Submit from the repo root.
 | Script | Runs | Wall-time |
 |--------|------|-----------|
 | `submit_q1_severity.slurm`  | `run_q1_severity.py` (config-driven: both datasets, v2_6 + v3) | 4 h |
-| `submit_q2_freq_v2_6.slurm` | `run_q2_frequency.py --force --tabpfn-versions v2_6` | 12 h |
-| `submit_q2_freq_v3.slurm`   | `run_q2_frequency.py --skip-baselines --tabpfn-versions v3` | 24 h |
+| `submit_q2_freq_v2_6.slurm` | `run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v2_6` | 12 h |
+| `submit_q2_freq_v3.slurm`   | `run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v3` | 24 h |
 
 ## Submission order
 
@@ -19,14 +19,15 @@ cd $VSC_DATA/tabpfn/tabpfn_insurance
 # Q1 severity — independent, submit any time.
 sbatch slurm/submit_q1_severity.slurm
 
-# Q2 frequency — MUST be staged. v2_6 first: it archives the freq CSVs, keeps the
-# GLM/XGBoost rows verbatim, drops the stale TabPFN rows, and regenerates v2_6.
-# v3 then APPENDS onto those rewritten CSVs, so it only starts if v2_6 succeeds.
+# Q2 frequency — MUST be staged. v2_6 first: it creates res/results_frequency_expo.csv
+# + res/results_error_frequency_expo.csv (GLM/XGBoost rows copied verbatim from the
+# original files) and adds the corrected v2_6 rows. v3 then APPENDS onto those files,
+# so it only starts if v2_6 succeeds. The original result files are never touched.
 JOBID=$(sbatch --parsable slurm/submit_q2_freq_v2_6.slurm)
 sbatch --dependency=afterok:$JOBID slurm/submit_q2_freq_v3.slurm
 
 # After both Q2 jobs finish, confirm the baselines were preserved byte-for-byte:
-python scripts/verify_q2_regeneration.py
+python scripts/verify_q2_regeneration.py --results-tag expo
 ```
 
 ## Notes
@@ -37,8 +38,12 @@ python scripts/verify_q2_regeneration.py
   is capped at its 100k pretraining ceiling, so its large sizes are skipped
   automatically and it finishes sooner.
 - **Restartability.** The two Q2 stages are split so a v3 failure never forces a
-  v2_6 redo. Both scripts write via the append-only results path; `--force` (v2_6)
-  is the only step that archives + rewrites.
+  v2_6 redo. Both write via the append-only results path into the `_expo` files.
+  To redo the whole re-run, delete the two `res/*_expo.csv` files first (they are
+  re-seeded from the originals); otherwise a rerun appends duplicate TabPFN rows.
+- **Baselines are copied, not recomputed.** Check the original files hold each
+  GLM/XGBoost row once before stage 1 (44 rows in `results_frequency.csv`, 20 in
+  `results_error_frequency.csv`) — the seed copies whatever is there.
 - **Changing cluster/account.** Settings are copied from the previous
   `slurm-tabpfn/` jobs (`--clusters=wice --partition=gpu_h100
   --account=lp_verbekelab`). Edit the `#SBATCH` headers if your allocation differs.

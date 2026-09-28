@@ -10,12 +10,15 @@ here has been auto-edited — flags only.
 ## How to regenerate the corrected numbers (VSC / CUDA)
 
 ```bash
-python scripts/run_q2_frequency.py --force --tabpfn-versions v2_6   # Step 2
-python scripts/verify_q2_regeneration.py                            # baselines unchanged?
-python scripts/run_q2_frequency.py --skip-baselines --tabpfn-versions v3  # Step 4
+python scripts/run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v2_6  # Step 2
+python scripts/run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v3    # Step 4
+python scripts/verify_q2_regeneration.py --results-tag expo                                    # baselines unchanged?
 ```
-Then re-run `notebooks/results_tables.ipynb` (it computes tables + Figure 1 from
-`res/`, so they regenerate automatically).
+The corrected run lands in NEW files `res/results_frequency_expo.csv` and
+`res/results_error_frequency_expo.csv` (GLM/XGBoost rows copied verbatim); the old
+Strategy-B files stay untouched for comparison. To switch the paper tables +
+Figure 1 over, point `_CSV_NAMES` in `notebooks/results_tables.ipynb` (cell 1) at
+the `_expo` files instead of the originals and re-run it.
 
 ## Repo-local language flagged (regenerated on re-run; not hand-edited)
 

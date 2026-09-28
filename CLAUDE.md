@@ -136,12 +136,14 @@ scale the existing `poisson_deviance`/`exposure_weighted_rmse_rate` calls expect
       into GLM/XGBoost; `metrics.py` unchanged; μ plugs into the Poisson-deviance call
       verbatim.
 - [~] **Step 2 — Wire into `scripts/run_q2_frequency.py` (TabPFN branch only).**
-      CODE COMPLETE, awaiting the VSC run (see D8). TabPFN branch uses
+      CODE COMPLETE, awaiting the VSC run (see D8, D10). TabPFN branch uses
       `get_raw_features_freq` + counterfactual `Exposure=1.0`; new CLI
-      `--force` / `--skip-baselines` / `--tabpfn-versions`. Regeneration = **archive +
-      rewrite in place** (decision A), **baselines preserved verbatim** (never
-      recomputed). Heavy sweep runs on the **VSC (CUDA)** — infeasible on the Mac
-      (MPS predict on one beMTPL97 test fold ≈ 9 min). Post-run: `verify_q2_regeneration.py`.
+      `--force` / `--skip-baselines` / `--tabpfn-versions` / `--results-tag`.
+      Regeneration = **new tagged files `res/*_expo.csv`** (D10, supersedes D8's
+      in-place rewrite), **baselines copied verbatim** (never recomputed); old
+      Strategy-B files kept for comparison. Heavy sweep runs on the **VSC (CUDA)** —
+      infeasible on the Mac (MPS predict on one beMTPL97 test fold ≈ 9 min). Post-run:
+      `verify_q2_regeneration.py --results-tag expo`.
 - [x] **Step 3 — Severity cleanup.** DONE *(IN-SCOPE: `scripts/run_q1_severity.py`
       call-site now omits `sample_weight` for TabPFN; `TabPFNSev` docstring notes
       "unweighted at estimation"; NEW `tests/test_tabpfn_sev_unweighted.py`).*
@@ -149,7 +151,7 @@ scale the existing `poisson_deviance`/`exposure_weighted_rmse_rate` calls expect
       identical inputs with/without the weight; GLM/XGBoost untouched) → **no VSC
       re-run needed for Step 3**; existing severity results stay valid.
 - [~] **Step 4 — Re-run v3** and reconcile with v2_6. VSC-blocked: no code; runs on
-      the VSC (`--skip-baselines --tabpfn-versions v3`), then reconcile the corrected
+      the VSC (`--skip-baselines --results-tag expo --tabpfn-versions v3`), then reconcile the corrected
       v2_6 vs v3 numbers once both exist.
 - [x] **Step 5 — Docs.** DONE (write-up + flags). `EXPERIMENTS.md` "Exposure
       Handling" rewritten to exposure-as-feature + counterfactual (freq) and
@@ -209,6 +211,21 @@ unchanged. That guarantee — not a file ban — is what makes the fix trustwort
   changed, a future `run_q3_shap.py` run would produce corrected freq deviance and a
   SHAP array that now includes an exposure feature. run_q3 was NOT modified or re-run.
   Decide at Step 5 whether Q3 freq interpretability should be regenerated.
+- **D10 — Keep old results side by side: tagged output files (supersedes D8's
+  in-place rewrite).** User wants the Strategy-B numbers kept for comparison. New
+  `--results-tag expo` redirects output to `res/results_frequency_expo.csv` +
+  `res/results_error_frequency_expo.csv`; with `--skip-baselines` a missing tagged
+  file is seeded with the header + GLM/XGBoost lines of the original, byte for byte
+  (an existing one is appended to, so v3 stacks onto v2_6). Original files are never
+  touched; `--force` is no longer used by the SLURM jobs (kept for in-place redo).
+  A separate file, not a new model label or `experiment_id`: `results_tables.ipynb`
+  dedupes on model+version (keep last) and fuses model+version for display, so
+  same-file rows would silently overwrite or pool old and new. Switching the paper
+  tables = point the notebook's `_CSV_NAMES` at the `_expo` files.
+  `verify_q2_regeneration.py --results-tag expo` checks the tagged baselines against
+  the originals. VSC's own `res/` held every baseline row twice (88/40 vs 44/20);
+  replace it with the Mac copies (snapshot-verified) before stage 1, since the seed
+  copies whatever is there.
 
 ---
 

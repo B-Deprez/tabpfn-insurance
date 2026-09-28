@@ -15,8 +15,8 @@
 #SBATCH --mail-user=bruno.deprez@kuleuven.be
 
 # Q2 frequency — STAGE 2 of 2 (TabPFN v3).
-# --skip-baselines appends TabPFN v3 rows onto the CSVs the v2_6 stage rewrote
-# (GLM/XGBoost preserved verbatim, no archiving). Submit this AFTER the v2_6 stage,
+# Appends TabPFN v3 rows onto the *_expo.csv files the v2_6 stage created
+# (GLM/XGBoost preserved verbatim; old result files untouched). Submit AFTER v2_6,
 # chained on its success, e.g.:
 #   JOBID=$(sbatch --parsable slurm/submit_q2_freq_v2_6.slurm)
 #   sbatch --dependency=afterok:$JOBID slurm/submit_q2_freq_v3.slurm
@@ -33,6 +33,6 @@ which python
 python -c "import tabpfn; print('TabPFN version:', tabpfn.__version__)"
 nvidia-smi
 
-python -u scripts/run_q2_frequency.py --skip-baselines --tabpfn-versions v3
+python -u scripts/run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v3
 
 echo "Finished q2 frequency (v3)"

@@ -22,19 +22,29 @@ written to ``res/results_error_frequency.csv``.
 
 Usage:
     python scripts/run_q2_frequency.py                       # baselines + TabPFN, append
-    python scripts/run_q2_frequency.py --force \
-        --tabpfn-versions v2_6                               # regenerate: archive old
-                                                            # freq CSVs, drop stale TabPFN
-                                                            # rows, keep GLM/XGBoost rows
-                                                            # verbatim, rerun TabPFN (v2_6)
     python scripts/run_q2_frequency.py --skip-baselines \
-        --tabpfn-versions v3                                 # append TabPFN v3 only
+        --results-tag expo --tabpfn-versions v2_6            # exposure re-run into NEW files
+                                                            # res/results_frequency_expo.csv
+                                                            # (+ _error_), seeded with the
+                                                            # GLM/XGBoost rows verbatim; the
+                                                            # old files are left untouched
+    python scripts/run_q2_frequency.py --skip-baselines \
+        --results-tag expo --tabpfn-versions v3              # append TabPFN v3 to the same
+    python scripts/run_q2_frequency.py --force \
+        --tabpfn-versions v2_6                               # archive + rewrite IN PLACE
 
---force archives ``res/results_frequency.csv`` and ``res/results_error_frequency.csv``
-to ``res/archive/`` and rewrites them keeping only the GLM/XGBoost rows (byte for
-byte); it implies --skip-baselines so the baselines are preserved, never
-recomputed. --skip-baselines alone appends TabPFN rows without archiving or
-touching the baselines.
+--results-tag TAG writes to ``res/results_frequency_TAG.csv`` and
+``res/results_error_frequency_TAG.csv`` instead of the default files, so a re-run
+sits next to the old results for comparison. With --skip-baselines, a tagged file
+that does not exist yet is seeded with the header and the GLM/XGBoost rows of the
+untagged file (byte for byte), making it a drop-in replacement for the original;
+an existing tagged file is appended to.
+
+--force archives the (possibly tagged) frequency CSVs to ``res/archive/`` and
+rewrites them keeping only the GLM/XGBoost rows (byte for byte); it implies
+--skip-baselines so the baselines are preserved, never recomputed.
+--skip-baselines alone appends TabPFN rows without archiving or touching the
+baselines.
 """
 
 from __future__ import annotations
@@ -403,6 +413,41 @@ def run_dataset(
 _BASELINE_MODELS = ("glm", "xgboost")
 
 
+def _is_baseline_row(line: str) -> bool:
+    # ``model`` is field index 3; result values never contain commas.
+    return line.split(",", 5)[3] in _BASELINE_MODELS
+
+
+def _tagged_path(path: Path, tag: str) -> Path:
+    """``res/results_frequency.csv`` -> ``res/results_frequency_<tag>.csv``."""
+    return path.with_name(f"{path.stem}_{tag}{path.suffix}")
+
+
+def _seed_baselines(src: Path, dst: Path) -> None:
+    """Create ``dst`` holding the header + GLM/XGBoost rows of ``src`` verbatim.
+
+    Used by --results-tag so the tagged file carries exactly the same baselines
+    as the original (text-level copy, no pandas reformatting) and can replace it
+    one-for-one. An existing ``dst`` is left as-is, so a later stage (v3 after
+    v2_6) appends onto it.
+    """
+    if dst.exists():
+        logger.info("--results-tag: %s exists; appending to it", dst.name)
+        return
+    if not src.exists():
+        logger.warning(
+            "--results-tag: %s does not exist; %s starts without baselines", src, dst.name,
+        )
+        return
+    lines = src.read_text().splitlines(keepends=True)
+    header, kept = lines[:1], [ln for ln in lines[1:] if _is_baseline_row(ln)]
+    dst.write_text("".join(header + kept))
+    logger.info(
+        "--results-tag: seeded %s with %d baseline rows from %s",
+        dst.name, len(kept), src.name,
+    )
+
+
 def _archive_and_keep_baselines(path: Path) -> None:
     """Archive ``path`` to res/archive/ then rewrite it keeping only GLM/XGBoost.
 
@@ -422,8 +467,7 @@ def _archive_and_keep_baselines(path: Path) -> None:
 
     lines = path.read_text().splitlines(keepends=True)
     header, body = lines[:1], lines[1:]
-    # ``model`` is field index 3; result values never contain commas.
-    kept = [ln for ln in body if ln.split(",", 5)[3] in _BASELINE_MODELS]
+    kept = [ln for ln in body if _is_baseline_row(ln)]
     path.write_text("".join(header + kept))
     logger.info(
         "--force: archived %s -> %s ; kept %d baseline rows, dropped %d TabPFN rows",
@@ -447,10 +491,18 @@ def _parse_args() -> argparse.Namespace:
         help="Restrict the TabPFN sweep to these versions (e.g. v2_6). "
              "Defaults to the versions in the config.",
     )
+    p.add_argument(
+        "--results-tag", default=None, metavar="TAG",
+        help="Write to res/results_frequency_TAG.csv and "
+             "res/results_error_frequency_TAG.csv instead of the default files "
+             "(the old results stay untouched). With --skip-baselines a new tagged "
+             "file is seeded with the GLM/XGBoost rows of the default file.",
+    )
     return p.parse_args()
 
 
 def main() -> None:
+    global RESULTS_PATH, ERROR_METRICS_PATH
     args = _parse_args()
 
     with open(CFG_PATH) as f:
@@ -464,10 +516,26 @@ def main() -> None:
     # --force implies preserving (not recomputing) the baselines.
     skip_baselines = args.skip_baselines or args.force
 
+    # Redirect output to tagged files so the old results stay side by side.
+    if args.results_tag:
+        untagged = (RESULTS_PATH, ERROR_METRICS_PATH)
+        RESULTS_PATH, ERROR_METRICS_PATH = (
+            _tagged_path(p, args.results_tag) for p in untagged
+        )
+        logger.info(
+            "--results-tag %s: writing to %s and %s",
+            args.results_tag, RESULTS_PATH.name, ERROR_METRICS_PATH.name,
+        )
+
     if args.force:
         logger.info("--force: regenerating TabPFN frequency rows (archive + rewrite)")
         for path in (RESULTS_PATH, ERROR_METRICS_PATH):
             _archive_and_keep_baselines(path)
+
+    # Baselines preserved (not recomputed): copy them into a new tagged file.
+    if args.results_tag and skip_baselines:
+        for src, dst in zip(untagged, (RESULTS_PATH, ERROR_METRICS_PATH)):
+            _seed_baselines(src, dst)
 
     for dataset in cfg["datasets"]:
         run_dataset(

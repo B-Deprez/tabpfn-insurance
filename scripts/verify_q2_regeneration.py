@@ -1,19 +1,26 @@
 """Post-regeneration invariant check for the Q2 frequency exposure fix.
 
-Run AFTER ``run_q2_frequency.py --force ...`` (e.g. on the VSC). Confirms the
-GLM/XGBoost rows in the live result CSVs are byte-identical to the copy that
-``--force`` just archived in ``res/archive/`` — i.e. the baselines were preserved
-verbatim and only the TabPFN rows were regenerated. Also summarises the corrected
-TabPFN rows now present.
+Run AFTER the exposure re-run (e.g. on the VSC). Confirms the GLM/XGBoost rows
+in the new result CSVs are byte-identical to the reference copy, i.e. the
+baselines were preserved verbatim and only the TabPFN rows were regenerated.
+Also counts the TabPFN rows now present.
+
+Reference depends on how the re-run was written:
+  * ``--results-tag TAG`` : new ``res/results_frequency_TAG.csv`` (+ ``_error_``)
+                            vs the untouched original ``res/results_frequency.csv``.
+  * ``--force``           : live ``res/results_frequency.csv`` vs the timestamped
+                            copy ``--force`` just archived in ``res/archive/``.
 
 Usage:
-    python scripts/verify_q2_regeneration.py
+    python scripts/verify_q2_regeneration.py --results-tag expo
+    python scripts/verify_q2_regeneration.py                      # --force layout
 
 Exit 0 = baselines unchanged; 1 = drift (investigate before trusting the run).
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -37,35 +44,52 @@ def _latest_archive(stem: str, suffix: str) -> Path | None:
     return cands[-1] if cands else None
 
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Verify Q2 baselines were preserved.")
+    p.add_argument(
+        "--results-tag", default=None, metavar="TAG",
+        help="Check the tagged files written with run_q2_frequency.py --results-tag "
+             "TAG against the untagged originals (default: --force archive layout).",
+    )
+    return p.parse_args()
+
+
 def main() -> int:
+    tag = _parse_args().results_tag
     ok = True
     for name in PAIRS:
-        live = RES / name
-        stem, suffix = live.stem, live.suffix
-        arch = _latest_archive(stem, suffix)
+        stem, suffix = Path(name).stem, Path(name).suffix
+        if tag:
+            live = RES / f"{stem}_{tag}{suffix}"
+            ref = RES / name
+        else:
+            live = RES / name
+            ref = _latest_archive(stem, suffix)
         if not live.exists():
-            print(f"!! {name}: live file missing")
+            print(f"!! {live.name}: live file missing")
             ok = False
             continue
-        if arch is None:
-            print(f"!! {name}: no timestamped archive found in {ARCHIVE} "
-                  f"(did you run with --force?)")
+        if ref is None or not ref.exists():
+            hint = f"{RES / name} missing" if tag else (
+                f"no timestamped archive in {ARCHIVE} (did you run with --force?)"
+            )
+            print(f"!! {live.name}: no reference file ({hint})")
             ok = False
             continue
 
         live_base = _baseline_lines(live)
-        arch_base = _baseline_lines(arch)
+        ref_base = _baseline_lines(ref)
         n_tabpfn = sum(
             1 for ln in live.read_text().splitlines()[1:]
             if "tabpfn" in ln.split(",", 5)[3]
         )
-        if live_base == arch_base:
-            print(f"OK  {name}: {len(live_base)} GLM/XGBoost rows byte-identical "
-                  f"to archive {arch.name}; {n_tabpfn} TabPFN rows present.")
+        if live_base == ref_base:
+            print(f"OK  {live.name}: {len(live_base)} GLM/XGBoost rows byte-identical "
+                  f"to {ref.name}; {n_tabpfn} TabPFN rows present.")
         else:
             ok = False
-            print(f"!! {name}: baseline rows DIFFER from archive {arch.name} "
-                  f"(live={len(live_base)} vs archive={len(arch_base)})")
+            print(f"!! {live.name}: baseline rows DIFFER from {ref.name} "
+                  f"(live={len(live_base)} vs reference={len(ref_base)})")
 
     print("\n" + ("OK — baselines preserved verbatim." if ok else "DRIFT — do not trust the run."))
     return 0 if ok else 1

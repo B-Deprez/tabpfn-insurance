@@ -15,11 +15,11 @@
 #SBATCH --mail-user=bruno.deprez@kuleuven.be
 
 # Q2 frequency — STAGE 1 of 2 (TabPFN v2_6).
-# --force archives res/results_frequency.csv + res/results_error_frequency.csv to
-# res/archive/, keeps the GLM/XGBoost rows byte-for-byte, drops the stale (invalid
-# Strategy-B) TabPFN rows, and regenerates TabPFN v2_6 with the exposure-as-feature
-# fix. --force implies --skip-baselines (baselines are preserved, never recomputed).
-# RUN THIS BEFORE the v3 stage — v3 appends onto the CSVs this job rewrites.
+# --results-tag expo writes the exposure-as-feature re-run to NEW files
+# res/results_frequency_expo.csv + res/results_error_frequency_expo.csv, seeded with
+# the GLM/XGBoost rows of the original files byte-for-byte (baselines preserved,
+# never recomputed). The old (Strategy-B) result files are left untouched so the two
+# runs can be compared. RUN THIS BEFORE the v3 stage — v3 appends onto these files.
 
 cd $VSC_DATA/tabpfn/tabpfn_insurance
 
@@ -30,6 +30,6 @@ which python
 python -c "import tabpfn; print('TabPFN version:', tabpfn.__version__)"
 nvidia-smi
 
-python -u scripts/run_q2_frequency.py --force --tabpfn-versions v2_6
+python -u scripts/run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v2_6
 
 echo "Finished q2 frequency (v2_6)"
