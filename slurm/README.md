@@ -10,6 +10,7 @@ in `slurm/logs/%x_%j.{out,err}` (job name + job id). Submit from the repo root.
 | `submit_q1_severity.slurm`  | `run_q1_severity.py --results-tag log1p` (GLM + XGBoost + TabPFN v2_6/v3, both datasets) | 4 h |
 | `submit_q2_freq_v2_6.slurm` | `run_q2_frequency.py --results-tag expo --tabpfn-versions v2_6` (GLM + XGBoost + TabPFN v2_6) | 12 h |
 | `submit_q2_freq_v3.slurm`   | `run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v3` | 24 h |
+| `submit_q2_freq.slurm`      | `run_q2_frequency.py --results-tag expo` (GLM + XGBoost + TabPFN v2_6/v3 in one job; alternative to the staged pair) | 48 h |
 
 ## Submission order
 
@@ -21,10 +22,14 @@ cd $VSC_DATA/tabpfn/tabpfn_insurance
 # + res/results_error_severity_log1p.csv.
 sbatch slurm/submit_q1_severity.slurm
 
-# Q2 frequency — MUST be staged. v2_6 first: it creates res/results_frequency_expo.csv
-# + res/results_error_frequency_expo.csv with GLM/XGBoost + TabPFN v2_6. v3 then
-# APPENDS onto those files, so it only starts if v2_6 succeeds.
-JOBID=$(sbatch --parsable slurm/submit_q2_freq_v2_6.slurm)
+# Q2 frequency — EITHER one job (GLM + XGBoost + TabPFN v2_6 + v3) ...
+sbatch slurm/submit_q2_freq.slurm
+
+# ... OR staged (never both: they write the same res/*_expo.csv files). v2_6 first:
+# it creates res/results_frequency_expo.csv + res/results_error_frequency_expo.csv
+# with GLM/XGBoost + TabPFN v2_6. v3 then APPENDS onto those files, so it only
+# starts if v2_6 succeeds. (--clusters makes --parsable print "ID;wice" -> cut.)
+JOBID=$(sbatch --parsable slurm/submit_q2_freq_v2_6.slurm | cut -d';' -f1)
 sbatch --dependency=afterok:$JOBID slurm/submit_q2_freq_v3.slurm
 ```
 
