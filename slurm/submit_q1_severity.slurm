@@ -14,13 +14,12 @@
 #SBATCH --mail-type=FAIL,BEGIN,END
 #SBATCH --mail-user=bruno.deprez@kuleuven.be
 
-# Q1 severity — TabPFN only (v2_6 + v3, both datasets), 1_plus_log fix.
+# Q1 severity — from scratch: GLM + XGBoost + TabPFN (v2_6 + v3), both datasets.
 # TabPFN severity now uses TabPFN's built-in 1_plus_log target transform and
 # returns the predictive mean on the original scale (was: fit on log(y), exp() the
-# prediction -> roughly the median, biased low). --results-tag log1p writes to NEW
-# files res/results_severity_log1p.csv + res/results_error_severity_log1p.csv,
-# seeded with the GLM/XGBoost rows of the original files byte-for-byte (baselines
-# preserved, never recomputed). The old severity result files are left untouched.
+# prediction -> roughly the median, biased low). --results-tag log1p writes to
+# res/results_severity_log1p.csv + res/results_error_severity_log1p.csv (named apart
+# from the old severity files kept on the Mac).
 
 cd $VSC_DATA/tabpfn/tabpfn_insurance
 
@@ -31,6 +30,6 @@ which python
 python -c "import tabpfn; print('TabPFN version:', tabpfn.__version__)"
 nvidia-smi
 
-python -u scripts/run_q1_severity.py --skip-baselines --results-tag log1p
+python -u scripts/run_q1_severity.py --results-tag log1p
 
 echo "Finished q1 severity"

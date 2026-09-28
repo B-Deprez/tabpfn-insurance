@@ -16,7 +16,7 @@
 
 # Q2 frequency — STAGE 2 of 2 (TabPFN v3).
 # Appends TabPFN v3 rows onto the *_expo.csv files the v2_6 stage created
-# (GLM/XGBoost preserved verbatim; old result files untouched). Submit AFTER v2_6,
+# (--skip-baselines: GLM/XGBoost were already written by stage 1). Submit AFTER v2_6,
 # chained on its success, e.g.:
 #   JOBID=$(sbatch --parsable slurm/submit_q2_freq_v2_6.slurm)
 #   sbatch --dependency=afterok:$JOBID slurm/submit_q2_freq_v3.slurm

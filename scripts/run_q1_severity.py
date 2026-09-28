@@ -15,6 +15,8 @@ returns the predictive mean on the original scale (see ``TabPFNSev``).
 
 Usage:
     python scripts/run_q1_severity.py                        # all models, append
+    python scripts/run_q1_severity.py --results-tag log1p    # from scratch: all models
+                                                            # into NEW _log1p files
     python scripts/run_q1_severity.py --skip-baselines \
         --results-tag log1p                                  # TabPFN re-run into NEW files
                                                             # res/results_severity_log1p.csv
@@ -314,10 +316,11 @@ def _seed_baselines(src: Path, dst: Path) -> None:
         logger.info("--results-tag: %s exists; appending to it", dst.name)
         return
     if not src.exists():
-        logger.warning(
-            "--results-tag: %s does not exist; %s starts without baselines", src, dst.name,
+        # Fail fast: continuing would write a tagged file with no GLM/XGBoost rows.
+        raise SystemExit(
+            f"--results-tag: {src} does not exist, so there are no baselines to copy "
+            f"into {dst.name}. Drop --skip-baselines to compute them in this run."
         )
-        return
     lines = src.read_text().splitlines(keepends=True)
     header, kept = lines[:1], [ln for ln in lines[1:] if _is_baseline_row(ln)]
     dst.write_text("".join(header + kept))

@@ -12,16 +12,17 @@ here has been auto-edited — flags only.
 ## How to regenerate the corrected numbers (VSC / CUDA)
 
 ```bash
-python scripts/run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v2_6  # Step 2
+python scripts/run_q2_frequency.py --results-tag expo --tabpfn-versions v2_6                   # Step 2 (+ GLM/XGBoost)
 python scripts/run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v3    # Step 4
 python scripts/verify_q2_regeneration.py --results-tag expo                                    # baselines unchanged?
-python scripts/run_q1_severity.py --skip-baselines --results-tag log1p                         # Step 6
+python scripts/run_q1_severity.py --results-tag log1p                                          # Step 6 (+ GLM/XGBoost)
 python scripts/verify_q2_regeneration.py --task sev --results-tag log1p                        # baselines unchanged?
 ```
 The corrected runs land in NEW files — `res/results_frequency_expo.csv` +
 `res/results_error_frequency_expo.csv` and `res/results_severity_log1p.csv` +
-`res/results_error_severity_log1p.csv` (GLM/XGBoost rows copied verbatim); the old
-files stay untouched for comparison. To switch the paper tables + Figure 1 over,
+`res/results_error_severity_log1p.csv` (GLM/XGBoost recomputed; the verify script,
+run on the Mac next to the old files, checks they reproduce the old values). The
+old files stay untouched for comparison. To switch the paper tables + Figure 1 over,
 point `_CSV_NAMES` in `notebooks/results_tables.ipynb` (cell 1) at the tagged
 files instead of the originals and re-run it.
 

@@ -7,8 +7,8 @@ in `slurm/logs/%x_%j.{out,err}` (job name + job id). Submit from the repo root.
 
 | Script | Runs | Wall-time |
 |--------|------|-----------|
-| `submit_q1_severity.slurm`  | `run_q1_severity.py --skip-baselines --results-tag log1p` (TabPFN v2_6 + v3, both datasets) | 4 h |
-| `submit_q2_freq_v2_6.slurm` | `run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v2_6` | 12 h |
+| `submit_q1_severity.slurm`  | `run_q1_severity.py --results-tag log1p` (GLM + XGBoost + TabPFN v2_6/v3, both datasets) | 4 h |
+| `submit_q2_freq_v2_6.slurm` | `run_q2_frequency.py --results-tag expo --tabpfn-versions v2_6` (GLM + XGBoost + TabPFN v2_6) | 12 h |
 | `submit_q2_freq_v3.slurm`   | `run_q2_frequency.py --skip-baselines --results-tag expo --tabpfn-versions v3` | 24 h |
 
 ## Submission order
@@ -16,22 +16,25 @@ in `slurm/logs/%x_%j.{out,err}` (job name + job id). Submit from the repo root.
 ```bash
 cd $VSC_DATA/tabpfn/tabpfn_insurance
 
+# Everything runs from scratch (res/ may be empty): GLM/XGBoost are recomputed.
 # Q1 severity — independent, submit any time. Writes res/results_severity_log1p.csv
-# + res/results_error_severity_log1p.csv (GLM/XGBoost copied verbatim from the
-# originals); the original severity files are never touched.
+# + res/results_error_severity_log1p.csv.
 sbatch slurm/submit_q1_severity.slurm
-# After it finishes:
-python scripts/verify_q2_regeneration.py --task sev --results-tag log1p
 
 # Q2 frequency — MUST be staged. v2_6 first: it creates res/results_frequency_expo.csv
-# + res/results_error_frequency_expo.csv (GLM/XGBoost rows copied verbatim from the
-# original files) and adds the corrected v2_6 rows. v3 then APPENDS onto those files,
-# so it only starts if v2_6 succeeds. The original result files are never touched.
+# + res/results_error_frequency_expo.csv with GLM/XGBoost + TabPFN v2_6. v3 then
+# APPENDS onto those files, so it only starts if v2_6 succeeds.
 JOBID=$(sbatch --parsable slurm/submit_q2_freq_v2_6.slurm)
 sbatch --dependency=afterok:$JOBID slurm/submit_q2_freq_v3.slurm
+```
 
-# After both Q2 jobs finish, confirm the baselines were preserved byte-for-byte:
+Afterwards, copy the four tagged CSVs into the Mac's `res/` (next to the old
+untagged files) and check the recomputed GLM/XGBoost values match the old ones
+(relative tolerance 1e-5; recomputed XGBoost differs by ~1e-6, so not byte-identical):
+
+```bash
 python scripts/verify_q2_regeneration.py --results-tag expo
+python scripts/verify_q2_regeneration.py --task sev --results-tag log1p
 ```
 
 ## Notes
@@ -43,12 +46,12 @@ python scripts/verify_q2_regeneration.py --results-tag expo
   automatically and it finishes sooner.
 - **Restartability.** The two Q2 stages are split so a v3 failure never forces a
   v2_6 redo. Both write via the append-only results path into the `_expo` files.
-  To redo the whole re-run, delete the two `res/*_expo.csv` files first (they are
-  re-seeded from the originals); otherwise a rerun appends duplicate TabPFN rows.
-- **Baselines are copied, not recomputed.** Check the original files hold each
-  GLM/XGBoost row once before stage 1 (44 rows in `results_frequency.csv`, 20 in
-  `results_error_frequency.csv`; 44 in `results_severity.csv`, 88 in
-  `results_error_severity.csv`) — the seed copies whatever is there.
+  To redo a stage-1 or Q1 run, delete its tagged `res/*_expo.csv` /
+  `res/*_log1p.csv` files first; otherwise the rerun appends duplicate rows.
+- **Copying instead of recomputing baselines.** `--skip-baselines --results-tag TAG`
+  seeds a new tagged file with the GLM/XGBoost rows of the untagged file. It now
+  stops with an error if the untagged file is missing (e.g. on an empty `res/`),
+  instead of writing a file without baselines.
 - **Changing cluster/account.** Settings are copied from the previous
   `slurm-tabpfn/` jobs (`--clusters=wice --partition=gpu_h100
   --account=lp_verbekelab`). Edit the `#SBATCH` headers if your allocation differs.

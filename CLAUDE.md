@@ -140,8 +140,8 @@ scale the existing `poisson_deviance`/`exposure_weighted_rmse_rate` calls expect
       `get_raw_features_freq` + counterfactual `Exposure=1.0`; new CLI
       `--force` / `--skip-baselines` / `--tabpfn-versions` / `--results-tag`.
       Regeneration = **new tagged files `res/*_expo.csv`** (D10, supersedes D8's
-      in-place rewrite), **baselines copied verbatim** (never recomputed); old
-      Strategy-B files kept for comparison. Heavy sweep runs on the **VSC (CUDA)** —
+      in-place rewrite); since D12 the VSC run is **from scratch** (stage 1 recomputes
+      GLM/XGBoost); old Strategy-B files kept on the Mac for comparison. Heavy sweep runs on the **VSC (CUDA)** —
       infeasible on the Mac (MPS predict on one beMTPL97 test fold ≈ 9 min). Post-run:
       `verify_q2_regeneration.py --results-tag expo`.
 - [x] **Step 3 — Severity cleanup.** DONE *(IN-SCOPE: `scripts/run_q1_severity.py`
@@ -172,7 +172,7 @@ scale the existing `poisson_deviance`/`exposure_weighted_rmse_rate` calls expect
       SHARED-additive: `_make_regressor(..., **overrides)`, default unchanged for freq;
       `scripts/run_q1_severity.py` gains `--skip-baselines` / `--results-tag`;
       `verify_q2_regeneration.py --task sev`; tests updated.)* Not number-preserving:
-      VSC run `--skip-baselines --results-tag log1p` → `res/*_severity_log1p.csv`.
+      VSC run `--results-tag log1p` (from scratch, D12) → `res/*_severity_log1p.csv`.
 
 **Invariant enforced by TEST after every step:** GLM/XGBoost statistical values
 (excluding `fit_predict_seconds`, which is wall-clock) diff byte-identically
@@ -246,6 +246,22 @@ unchanged. That guarantee — not a file ban — is what makes the fix trustwort
   3.84 → 2.10. Re-run tagged `log1p` (D10 mechanism), old severity files kept.
   Flag: `TabPFNSev.get_shap_values` now explains original-scale predictions (was
   log scale) — Q3 severity SHAP changes if re-run; run_q3 not modified or re-run.
+- **D12 — VSC re-run from scratch (supersedes the copy-baselines part of D8/D10).**
+  User deleted all results on the VSC, so there is nothing to seed from. SLURM:
+  Q2 stage 1 `--results-tag expo --tabpfn-versions v2_6` (GLM + XGBoost + v2_6),
+  stage 2 `--skip-baselines --results-tag expo --tabpfn-versions v3` (appends);
+  Q1 `--results-tag log1p` (all models). Tags kept so the new CSVs sit beside the
+  old untagged ones on the Mac. `_seed_baselines` now **fails fast** when the
+  untagged source is missing (was: warn and write a file with no baselines).
+  `verify_q2_regeneration.py` now compares GLM/XGBoost *values* (timestamp and
+  `fit_predict_seconds` excluded) with a relative tolerance (`--rtol`, default
+  1e-5) and reports the max relative difference, instead of byte-identical lines:
+  recomputed baselines are NOT byte-identical. Mac rehearsal (real GLM/XGBoost,
+  stubbed TabPFN, empty `res/`) vs the snapshot-verified files: GLM ≤ 1.4e-11 rel,
+  XGBoost (`hist`) ≤ 4.2e-6 rel — invisible at table precision. So for a from-scratch
+  run the §4 invariant holds to `rtol`, not byte-for-byte. Run it on the Mac after
+  copying the tagged CSVs back (the old reference files live only there). Q3/Q4 are not part of the re-run: neither has results in `res/` (Q3 only
+  partial freMTPL2 GLM/XGBoost arrays from May; Q4 none).
 
 ---
 

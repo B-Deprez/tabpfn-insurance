@@ -22,6 +22,9 @@ written to ``res/results_error_frequency.csv``.
 
 Usage:
     python scripts/run_q2_frequency.py                       # baselines + TabPFN, append
+    python scripts/run_q2_frequency.py --results-tag expo \
+        --tabpfn-versions v2_6                               # from scratch: GLM/XGBoost +
+                                                            # TabPFN v2_6 into NEW _expo files
     python scripts/run_q2_frequency.py --skip-baselines \
         --results-tag expo --tabpfn-versions v2_6            # exposure re-run into NEW files
                                                             # res/results_frequency_expo.csv
@@ -435,10 +438,11 @@ def _seed_baselines(src: Path, dst: Path) -> None:
         logger.info("--results-tag: %s exists; appending to it", dst.name)
         return
     if not src.exists():
-        logger.warning(
-            "--results-tag: %s does not exist; %s starts without baselines", src, dst.name,
+        # Fail fast: continuing would write a tagged file with no GLM/XGBoost rows.
+        raise SystemExit(
+            f"--results-tag: {src} does not exist, so there are no baselines to copy "
+            f"into {dst.name}. Drop --skip-baselines to compute them in this run."
         )
-        return
     lines = src.read_text().splitlines(keepends=True)
     header, kept = lines[:1], [ln for ln in lines[1:] if _is_baseline_row(ln)]
     dst.write_text("".join(header + kept))
