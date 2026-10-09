@@ -7,10 +7,19 @@ values natively — no feature encoding is required.  Raw feature columns from
 The internal ``ModelVersion`` (``v2_5``, ``v2_6`` or ``v3``) is selected per
 call via ``create_default_for_version``.  The default is ``v3``.
 
-Exposure strategy B is used throughout:
-    Frequency  : response = ClaimNb / Exposure (annualised rate)
-    Severity   : response = log(AvgSeverity) (log-transformed),
-                 predictions inverted with exp()
+Exposure / target handling:
+    Frequency  : exposure-as-feature (EAJ Referee 1 fix). TabPFN supports
+                 neither a Poisson offset nor sample_weight, so exposure is an
+                 ordinary input feature; the model is trained on the bounded
+                 COUNT (ClaimNb) and the annualised rate μ is recovered with a
+                 counterfactual Exposure=1.0 query at predict time. This is NOT a
+                 true offset — the model learns the exposure effect rather than
+                 having a unit slope on log(Exposure) imposed.
+    Severity   : response = raw AvgSeverity with TabPFN's built-in ``1_plus_log``
+                 target transform (fit on log(1 + y)); ``predict`` returns the
+                 mean of the predictive distribution on the ORIGINAL scale, so
+                 no manual exp() back-transform (which would give roughly the
+                 median, biased below the mean).
 
 TabPFNRegressor.fit() accepts only (X, y) — no sample_weight argument.
 
@@ -38,6 +47,13 @@ _VERSION_LABELS = ("v2_5", "v2_6", "v3")
 # is passed.  Versions not listed here have no fixed ceiling.
 _VERSION_MAX_TRAIN_SIZE = {"v2_5": 50_000, "v2_6": 100_000}
 
+# Default name of the injected exposure feature for the frequency task. Frequency
+# runners that build features with ``get_raw_features_freq`` already carry the
+# exposure column and pass its real name (``Exposure`` / ``expo``) via
+# ``exposure_col``. Callers that instead supply exposure through ``sample_weight``
+# (e.g. the SHAP path) get it injected under this default name.
+_DEFAULT_EXPOSURE_FEATURE = "Exposure"
+
 
 def _effective_max_train_size(version: str, requested: int) -> int:
     """Return ``min(requested, upstream_ceiling)`` for the given version."""
@@ -59,12 +75,22 @@ def _resolve_model_version(version: str):
     )
 
 
-def _make_regressor(version: str, device: str):
-    """Build a ``TabPFNRegressor`` for the requested internal model version."""
+def _make_regressor(version: str, device: str, **overrides):
+    """Build a ``TabPFNRegressor`` for the requested internal model version.
+
+    ``overrides`` are forwarded to ``create_default_for_version`` (e.g. the
+    severity ``inference_config``); without them the version defaults apply.
+    """
     from tabpfn import TabPFNRegressor
     return TabPFNRegressor.create_default_for_version(
-        _resolve_model_version(version), device=device,
+        _resolve_model_version(version), device=device, **overrides,
     )
+
+
+# Severity target transform: TabPFN fits on log(1 + y) and inverts the whole
+# predictive distribution, so ``predict`` returns E[y] on the original scale.
+# Same setting as the Prior Labs insurance cookbook's claim-amount models.
+_SEV_INFERENCE_CONFIG = {"REGRESSION_Y_PREPROCESS_TRANSFORMS": ("1_plus_log",)}
 
 
 def _make_classifier(version: str, device: str):
@@ -104,26 +130,68 @@ def _subsample(
 
 
 class TabPFNFreq:
-    """TabPFN regressor for frequency modelling (Strategy B).
+    """TabPFN regressor for frequency modelling (exposure as an input feature).
 
-    Raw unencoded features are passed directly to TabPFN.
-    Response = ClaimNb / Exposure (annualised rate).
+    Exposure fairness fix (EAJ Referee 1). TabPFN supports neither a Poisson
+    offset (as the GLM uses) nor sample_weight / base_margin (as XGBoost uses),
+    so exposure cannot enter the way it does for the baselines. Instead:
+
+    * **Exposure is an ordinary input feature.** The model is trained on the
+      *bounded* claim COUNT ``ClaimNb`` — never the rate ``ClaimNb/Exposure``,
+      which explodes for tiny exposures — with exposure as one of the inputs.
+    * **The annualised rate is recovered by a counterfactual query.**
+      ``predict`` sets the exposure feature to ``1.0`` for every row, so the
+      model's expected-count output is already the expected count over a full
+      year = the annualised frequency μ — exactly the rate scale that the
+      exposure-weighted Poisson deviance expects, so it plugs into the existing
+      metric unchanged.
+
+    Limitation: exposure-as-feature is NOT a true offset. GLM/XGBoost impose a
+    unit slope on ``log(Exposure)``; TabPFN *learns* the exposure effect from the
+    data. It is the fairest option available for a model with neither an offset
+    nor sample_weight, but it is not identical to an offset.
+
+    Exposure may reach the model two ways, both handled here:
+      1. already present in ``X_train`` as ``exposure_col`` (the frequency runner
+         builds features with ``get_raw_features_freq``); or
+      2. supplied via ``sample_weight`` while absent from ``X_train`` (the SHAP
+         path passes raw features plus exposure as the weight) — it is then
+         injected as the ``exposure_col`` feature.
     """
 
     def __init__(
         self,
         max_train_size: int = 100_000,
         tabpfn_version: str = "v3",
+        exposure_col: str = _DEFAULT_EXPOSURE_FEATURE,
     ) -> None:
         self.max_train_size = _effective_max_train_size(tabpfn_version, max_train_size)
         self.tabpfn_version = tabpfn_version
+        self.exposure_col = exposure_col
         self._model = None
         self._feature_names: list[str] = []
         self._device = _detect_device()
         logger.info(
-            "TabPFNFreq: device=%s, max_train_size=%d, version=%s",
-            self._device, max_train_size, tabpfn_version,
+            "TabPFNFreq: device=%s, max_train_size=%d, version=%s, exposure_col=%s",
+            self._device, max_train_size, tabpfn_version, exposure_col,
         )
+
+    def _with_exposure(
+        self,
+        X: pd.DataFrame,
+        exposure: "np.ndarray | float",
+    ) -> pd.DataFrame:
+        """Return a copy of ``X`` with the exposure feature set to ``exposure``.
+
+        ``exposure`` is a per-row array at training time, or the scalar ``1.0``
+        for the counterfactual annualisation query at predict time. Assigning an
+        existing column overwrites it in place (position preserved); assigning a
+        new column appends it last. Training and prediction therefore see the
+        exposure feature in the same position either way.
+        """
+        X_aug = X.copy()
+        X_aug[self.exposure_col] = exposure
+        return X_aug
 
     def fit(
         self,
@@ -133,31 +201,42 @@ class TabPFNFreq:
         log_exposure: np.ndarray | None = None,
         fold_seed: int = 0,
     ) -> "TabPFNFreq":
-        """Fit TabPFN on raw features with Strategy B response.
+        """Fit TabPFN on raw features + exposure, targeting the claim COUNT.
 
         Args:
-            X_train: raw (unencoded) feature DataFrame.
-            y_train: claim counts (NOT rates — conversion is done here).
-            sample_weight: exposure array used to compute the rate response.
+            X_train: raw (unencoded) feature DataFrame. If it already contains
+                ``exposure_col`` it is used as-is; otherwise the exposure is taken
+                from ``sample_weight`` and injected as that feature.
+            y_train: claim COUNTS (ClaimNb) — modelled directly, NOT converted to
+                a rate and NOT log-transformed (counts are small and bounded).
+            sample_weight: exposure array; used to populate the exposure feature
+                when it is not already a column of ``X_train``.
             log_exposure: unused; accepted for interface parity with GLM/XGBoost.
             fold_seed: RNG seed for the subsample draw.
         """
-        self._feature_names = list(X_train.columns)
-        exposure = sample_weight if sample_weight is not None else np.ones(len(y_train))
+        if self.exposure_col in X_train.columns:
+            X_aug = X_train
+        else:
+            exposure = (
+                sample_weight if sample_weight is not None else np.ones(len(y_train))
+            )
+            X_aug = self._with_exposure(X_train, np.asarray(exposure, dtype=float))
 
-        # Strategy B: response = annualised rate
-        y_rate = y_train / np.maximum(exposure, 1e-10)
+        self._feature_names = list(X_aug.columns)
 
-        X_sub, y_sub = _subsample(X_train, y_rate, self.max_train_size, fold_seed)
-        if len(X_sub) < len(X_train):
+        # Model the bounded count directly — no rate, no log transform.
+        y_count = np.asarray(y_train, dtype=float)
+
+        X_sub, y_sub = _subsample(X_aug, y_count, self.max_train_size, fold_seed)
+        if len(X_sub) < len(X_aug):
             logger.info(
                 "TabPFNFreq: subsampled %d → %d rows (seed=%d)",
-                len(X_train), len(X_sub), fold_seed,
+                len(X_aug), len(X_sub), fold_seed,
             )
 
         self._model = _make_regressor(self.tabpfn_version, self._device)
         self._model.fit(X_sub, y_sub)
-        logger.info("TabPFNFreq fitted on %d rows", len(X_sub))
+        logger.info("TabPFNFreq fitted on %d rows (target=ClaimNb count)", len(X_sub))
         return self
 
     def predict(
@@ -165,10 +244,17 @@ class TabPFNFreq:
         X_test: pd.DataFrame,
         log_exposure: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Return predicted claim rates."""
+        """Return the annualised claim rate μ via a counterfactual Exposure=1 query.
+
+        Every test row is evaluated at a full year of exposure, so the model's
+        expected-count output is already the per-year rate. ``log_exposure`` is
+        accepted for interface parity but unused — the counterfactual query, not
+        an offset, does the annualisation.
+        """
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet")
-        return self._model.predict(X_test)
+        X_query = self._with_exposure(X_test, 1.0)
+        return self._model.predict(X_query)
 
     @property
     def feature_names(self) -> list[str]:
@@ -176,10 +262,19 @@ class TabPFNFreq:
 
 
 class TabPFNSev:
-    """TabPFN regressor for severity modelling (Strategy B + log-transform).
+    """TabPFN regressor for severity modelling (``1_plus_log`` target transform).
 
-    Raw unencoded features are passed directly to TabPFN.
-    Response = log(AvgSeverity); predictions are inverted with exp().
+    Raw unencoded features are passed directly to TabPFN. The response is the
+    raw AvgSeverity; TabPFN's built-in ``1_plus_log`` transform fits on
+    log(1 + y) and maps the predictive distribution back, so ``predict`` returns
+    its MEAN on the original scale. This replaces the former manual
+    fit-on-log(y) / exp(prediction), which returned exp(E[log y]) — roughly the
+    median, systematically below E[y] for right-skewed claim amounts.
+
+    Unweighted at estimation: TabPFN supports no sample_weight, so the ClaimNb
+    weighting used by the GLM/XGBoost severity models is NOT applied at fit time
+    (it legitimately remains at evaluation, where gamma_deviance weights by
+    ClaimNb). ``sample_weight`` is still accepted for interface parity but ignored.
     """
 
     def __init__(
@@ -205,29 +300,30 @@ class TabPFNSev:
         log_exposure: np.ndarray | None = None,
         fold_seed: int = 0,
     ) -> "TabPFNSev":
-        """Fit TabPFN on log-transformed average severity.
+        """Fit TabPFN on raw average severity with the ``1_plus_log`` transform.
 
         Args:
             X_train: raw (unencoded) feature DataFrame.
-            y_train: average severity (AvgSeverity = ClaimAmount / ClaimNb).
+            y_train: average severity (AvgSeverity = ClaimAmount / ClaimNb),
+                passed on the original scale — TabPFN applies log(1 + y).
             sample_weight: accepted for interface parity; not used (TabPFN
                 does not support sample_weight in fit()).
             log_exposure: unused for severity; accepted for interface parity.
             fold_seed: RNG seed for the subsample draw.
         """
         self._feature_names = list(X_train.columns)
+        y = np.asarray(y_train, dtype=float)
 
-        # Log-transform response (CLAUDE.md §Feature Encoding)
-        log_y = np.log(np.maximum(y_train, 1e-10))
-
-        X_sub, y_sub = _subsample(X_train, log_y, self.max_train_size, fold_seed)
+        X_sub, y_sub = _subsample(X_train, y, self.max_train_size, fold_seed)
         if len(X_sub) < len(X_train):
             logger.info(
                 "TabPFNSev: subsampled %d → %d rows (seed=%d)",
                 len(X_train), len(X_sub), fold_seed,
             )
 
-        self._model = _make_regressor(self.tabpfn_version, self._device)
+        self._model = _make_regressor(
+            self.tabpfn_version, self._device, inference_config=_SEV_INFERENCE_CONFIG,
+        )
         self._model.fit(X_sub, y_sub)
         logger.info("TabPFNSev fitted on %d rows", len(X_sub))
         return self
@@ -237,13 +333,13 @@ class TabPFNSev:
         X_test: pd.DataFrame,
         log_exposure: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Return predicted average severity (exp of log-space prediction)."""
+        """Return predicted average severity: the predictive MEAN, original scale."""
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet")
-        return np.exp(self._model.predict(X_test))
+        return self._model.predict(X_test)
 
     def get_shap_values(self, X_test: pd.DataFrame) -> np.ndarray:
-        """Return SHAP values in log-space from TabPFN's built-in explainer."""
+        """Return SHAP values (original severity scale) from TabPFN's explainer."""
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet")
         if hasattr(self._model, "get_shap_values"):
@@ -329,19 +425,26 @@ class TabPFNClf:
 
 
 class TabPFNFreqWithShap(TabPFNFreq):
-    """TabPFNFreq extended with SHAP computation (used by run_q3_shap.py)."""
+    """TabPFNFreq extended with SHAP computation (used by run_q3_shap.py).
+
+    The explained frame is the counterfactual Exposure=1.0 query, so it matches
+    the feature set the model was trained on (raw features + exposure). Note this
+    means the returned SHAP array now includes an exposure column — a downstream
+    change for Q3 frequency interpretability, flagged for a separate decision.
+    """
 
     def get_shap_values(self, X_test: pd.DataFrame) -> np.ndarray:
         """Return SHAP values from TabPFN's built-in explainer or KernelExplainer."""
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet")
+        X_query = self._with_exposure(X_test, 1.0)
         if hasattr(self._model, "get_shap_values"):
-            return self._model.get_shap_values(X_test)
+            return self._model.get_shap_values(X_query)
         logger.warning("TabPFN built-in SHAP not available; falling back to KernelExplainer")
         import shap
-        bg = X_test.iloc[:min(100, len(X_test))]
+        bg = X_query.iloc[:min(100, len(X_query))]
         explainer = shap.KernelExplainer(self._model.predict, bg)
-        return explainer.shap_values(X_test, nsamples=100)
+        return explainer.shap_values(X_query, nsamples=100)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -353,6 +456,7 @@ def make_tabpfn(
     max_train_size: int = 100_000,
     shap: bool = False,
     tabpfn_version: str = "v3",
+    exposure_col: str = _DEFAULT_EXPOSURE_FEATURE,
 ):
     """Return the appropriate TabPFN wrapper for the given task.
 
@@ -361,10 +465,14 @@ def make_tabpfn(
         max_train_size: maximum training rows.
         shap: if True, return a SHAP-capable variant for Q3 (freq/sev only).
         tabpfn_version: internal ``ModelVersion`` to use — ``"v2_5"``, ``"v2_6"`` or ``"v3"``.
+        exposure_col: (freq only) name of the exposure input feature. Frequency
+            runners pass the dataset's real exposure column (``Exposure`` /
+            ``expo``); callers that supply exposure via ``sample_weight`` can rely
+            on the default.
     """
     if task == "freq":
         cls = TabPFNFreqWithShap if shap else TabPFNFreq
-        return cls(max_train_size, tabpfn_version=tabpfn_version)
+        return cls(max_train_size, tabpfn_version=tabpfn_version, exposure_col=exposure_col)
     if task == "sev":
         return TabPFNSev(max_train_size, tabpfn_version=tabpfn_version)
     if task == "clf":
